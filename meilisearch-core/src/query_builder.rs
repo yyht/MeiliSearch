@@ -1,4 +1,4 @@
-use hashbrown::HashMap;
+use std::borrow::Cow;
 use std::convert::TryFrom;
 use std::ops::Range;
 use std::rc::Rc;
@@ -8,6 +8,8 @@ use std::{cmp, mem};
 use fst::{IntoStreamer, Streamer};
 use sdset::SetBuf;
 use slice_group_by::{GroupBy, GroupByMut};
+use hashbrown::HashMap;
+use meilisearch_schema::SchemaAttr;
 
 use crate::database::MainT;
 use crate::automaton::{Automaton, AutomatonGroup, AutomatonProducer, QueryEnhancer};
@@ -16,6 +18,47 @@ use crate::levenshtein::prefix_damerau_levenshtein;
 use crate::raw_document::{raw_documents_from, RawDocument};
 use crate::{criterion::Criteria, Document, DocumentId, Highlight, TmpMatch};
 use crate::{reordered_attrs::ReorderedAttrs, store, MResult};
+
+pub trait DataStore {
+    fn words_fst(&self) -> Option<&fst::Map>;
+    fn postings_list(&self, word: &[u8], out: Option<u64>) -> Option<Cow<sdset::Set<crate::DocIndex>>>;
+
+    fn synonyms_fst(&self) -> Option<&fst::Set>;
+    fn synonyms(&self, word: &[u8]) -> Option<fst::Set>;
+
+    fn fields_counts(&self, id: DocumentId) -> Vec<(SchemaAttr, u64)>;
+}
+
+struct StoreEngine<'r> {
+    reader: &'r heed::RoTxn<MainT>,
+    main_store: store::Main,
+    postings_lists_store: store::PostingsLists,
+    documents_fields_counts_store: store::DocumentsFieldsCounts,
+    synonyms_store: store::Synonyms,
+}
+
+impl<'r> DataStore for StoreEngine<'r> {
+    fn words_fst(&self) -> Option<&fst::Map> {
+        // self.main_store.words_fst(self.reader).ok().flatten()
+        unimplemented!()
+    }
+
+    fn postings_list(&self, word: &[u8], out: Option<u64>) -> Option<Cow<sdset::Set<crate::DocIndex>>> {
+        unimplemented!()
+    }
+
+    fn synonyms_fst(&self) -> Option<&fst::Set> {
+        unimplemented!()
+    }
+
+    fn synonyms(&self, word: &[u8]) -> Option<fst::Set> {
+        unimplemented!()
+    }
+
+    fn fields_counts(&self, id: DocumentId) -> Vec<(SchemaAttr, u64)> {
+        unimplemented!()
+    }
+}
 
 pub struct QueryBuilder<'c, 'f, 'd> {
     criteria: Criteria<'c>,
@@ -140,13 +183,10 @@ fn multiword_rewrite_matches(
 }
 
 fn fetch_raw_documents(
-    reader: &heed::RoTxn<MainT>,
     automatons_groups: &[AutomatonGroup],
     query_enhancer: &QueryEnhancer,
     searchables: Option<&ReorderedAttrs>,
-    main_store: store::Main,
-    postings_lists_store: store::PostingsLists,
-    documents_fields_counts_store: store::DocumentsFieldsCounts,
+    engine: &dyn DataStore,
 ) -> MResult<Vec<RawDocument>> {
     let mut matches = Vec::new();
     let mut highlights = Vec::new();
@@ -169,13 +209,13 @@ fn fetch_raw_documents(
             } = automaton;
             let dfa = automaton.dfa();
 
-            let words = match main_store.words_fst(reader)? {
+            let words = match engine.words_fst() {
                 Some(words) => words,
                 None => return Ok(Vec::new()),
             };
 
             let mut stream = words.search(&dfa).into_stream();
-            while let Some(input) = stream.next() {
+            while let Some((input, out)) = stream.next() {
                 let distance = dfa.eval(input).to_u8();
                 let is_exact = *is_exact && distance == 0 && input.len() == *query_len;
 
@@ -185,7 +225,7 @@ fn fetch_raw_documents(
                     prefix_damerau_levenshtein(query.as_bytes(), input).1
                 };
 
-                let doc_indexes = match postings_lists_store.postings_list(reader, input)? {
+                let doc_indexes = match engine.postings_list(input, Some(out)) {
                     Some(doc_indexes) => doc_indexes,
                     None => continue,
                 };
@@ -261,8 +301,8 @@ fn fetch_raw_documents(
         let mut fields_counts = Vec::new();
         for group in matches.linear_group_by_key(|(id, ..)| *id) {
             let id = group[0].0;
-            for result in documents_fields_counts_store.document_fields_counts(reader, id)? {
-                let (attr, count) = result?;
+            for (attr, count) in engine.fields_counts(id) {
+                // let (attr, count) = result?;
                 fields_counts.push((id, attr, count));
             }
         }
@@ -341,9 +381,16 @@ impl<'c, 'f, 'd> QueryBuilder<'c, 'f, 'd> {
         query: &str,
         range: Range<usize>,
     ) -> MResult<Vec<Document>> {
+        let engine = StoreEngine {
+            reader: reader,
+            main_store: self.main_store,
+            postings_lists_store: self.postings_lists_store,
+            documents_fields_counts_store: self.documents_fields_counts_store,
+            synonyms_store: self.synonyms_store,
+        };
+
         match self.distinct {
             Some((distinct, distinct_size)) => raw_query_with_distinct(
-                reader,
                 query,
                 range,
                 self.filter,
@@ -352,44 +399,29 @@ impl<'c, 'f, 'd> QueryBuilder<'c, 'f, 'd> {
                 self.timeout,
                 self.criteria,
                 self.searchable_attrs,
-                self.main_store,
-                self.postings_lists_store,
-                self.documents_fields_counts_store,
-                self.synonyms_store,
+                &engine,
             ),
             None => raw_query(
-                reader,
                 query,
                 range,
                 self.filter,
                 self.timeout,
                 self.criteria,
                 self.searchable_attrs,
-                self.main_store,
-                self.postings_lists_store,
-                self.documents_fields_counts_store,
-                self.synonyms_store,
+                &engine,
             ),
         }
     }
 }
 
-fn raw_query<'c, FI>(
-    reader: &heed::RoTxn<MainT>,
-
+pub fn raw_query<'c, FI>(
     query: &str,
     range: Range<usize>,
-
     filter: Option<FI>,
     timeout: Option<Duration>,
-
     criteria: Criteria<'c>,
     searchable_attrs: Option<ReorderedAttrs>,
-
-    main_store: store::Main,
-    postings_lists_store: store::PostingsLists,
-    documents_fields_counts_store: store::DocumentsFieldsCounts,
-    synonyms_store: store::Synonyms,
+    engine: &dyn DataStore,
 ) -> MResult<Vec<Document>>
 where
     FI: Fn(DocumentId) -> bool,
@@ -400,7 +432,6 @@ where
         let distinct = |_| None;
         let distinct_size = 1;
         return raw_query_with_distinct(
-            reader,
             query,
             range,
             filter,
@@ -409,24 +440,14 @@ where
             timeout,
             criteria,
             searchable_attrs,
-            main_store,
-            postings_lists_store,
-            documents_fields_counts_store,
-            synonyms_store,
+            engine,
         );
     }
 
     let start_processing = Instant::now();
     let mut raw_documents_processed = Vec::with_capacity(range.len());
 
-    let (automaton_producer, query_enhancer) = AutomatonProducer::new(
-        reader,
-        query,
-        main_store,
-        postings_lists_store,
-        synonyms_store,
-    )?;
-
+    let (automaton_producer, query_enhancer) = AutomatonProducer::new(query, engine)?;
     let automaton_producer = automaton_producer.into_iter();
     let mut automatons = Vec::new();
 
@@ -437,13 +458,10 @@ where
         // we must retrieve the documents associated
         // with the current automatons
         let mut raw_documents = fetch_raw_documents(
-            reader,
             &automatons,
             &query_enhancer,
             searchable_attrs.as_ref(),
-            main_store,
-            postings_lists_store,
-            documents_fields_counts_store,
+            engine,
         )?;
 
         // stop processing when time is running out
@@ -510,25 +528,16 @@ where
     Ok(documents)
 }
 
-fn raw_query_with_distinct<'c, FI, FD>(
-    reader: &heed::RoTxn<MainT>,
-
+pub fn raw_query_with_distinct<'c, FI, FD>(
     query: &str,
     range: Range<usize>,
-
     filter: Option<FI>,
-
     distinct: FD,
     distinct_size: usize,
     timeout: Option<Duration>,
-
     criteria: Criteria<'c>,
     searchable_attrs: Option<ReorderedAttrs>,
-
-    main_store: store::Main,
-    postings_lists_store: store::PostingsLists,
-    documents_fields_counts_store: store::DocumentsFieldsCounts,
-    synonyms_store: store::Synonyms,
+    engine: &dyn DataStore,
 ) -> MResult<Vec<Document>>
 where
     FI: Fn(DocumentId) -> bool,
@@ -537,14 +546,7 @@ where
     let start_processing = Instant::now();
     let mut raw_documents_processed = Vec::new();
 
-    let (automaton_producer, query_enhancer) = AutomatonProducer::new(
-        reader,
-        query,
-        main_store,
-        postings_lists_store,
-        synonyms_store,
-    )?;
-
+    let (automaton_producer, query_enhancer) = AutomatonProducer::new(query, engine)?;
     let automaton_producer = automaton_producer.into_iter();
     let mut automatons = Vec::new();
 
@@ -555,13 +557,10 @@ where
         // we must retrieve the documents associated
         // with the current automatons
         let mut raw_documents = fetch_raw_documents(
-            reader,
             &automatons,
             &query_enhancer,
             searchable_attrs.as_ref(),
-            main_store,
-            postings_lists_store,
-            documents_fields_counts_store,
+            engine,
         )?;
 
         // stop processing when time is running out

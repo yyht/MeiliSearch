@@ -9,7 +9,7 @@ mod distinct_map;
 mod error;
 mod levenshtein;
 mod number;
-mod query_builder;
+pub mod query_builder;
 mod ranked_map;
 mod raw_document;
 pub mod raw_indexer;

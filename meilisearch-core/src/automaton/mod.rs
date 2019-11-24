@@ -8,9 +8,8 @@ use fst::{IntoStreamer, Streamer};
 use levenshtein_automata::DFA;
 use meilisearch_tokenizer::{is_cjk, split_query_string};
 
-use crate::database::MainT;
+use crate::query_builder::DataStore;
 use crate::error::MResult;
-use crate::store;
 
 use self::dfa::{build_dfa, build_prefix_dfa};
 pub use self::query_enhancer::QueryEnhancer;
@@ -23,21 +22,8 @@ pub struct AutomatonProducer {
 }
 
 impl AutomatonProducer {
-    pub fn new(
-        reader: &heed::RoTxn<MainT>,
-        query: &str,
-        main_store: store::Main,
-        postings_list_store: store::PostingsLists,
-        synonyms_store: store::Synonyms,
-    ) -> MResult<(AutomatonProducer, QueryEnhancer)> {
-        let (automatons, query_enhancer) = generate_automatons(
-            reader,
-            query,
-            main_store,
-            postings_list_store,
-            synonyms_store,
-        )?;
-
+    pub fn new(query: &str, engine: &dyn DataStore) -> MResult<(AutomatonProducer, QueryEnhancer)> {
+        let (automatons, query_enhancer) = generate_automatons(query, engine)?;
         Ok((AutomatonProducer { automatons }, query_enhancer))
     }
 
@@ -131,23 +117,19 @@ pub fn normalize_str(string: &str) -> String {
     string
 }
 
-fn split_best_frequency<'a>(
-    reader: &heed::RoTxn<MainT>,
-    word: &'a str,
-    postings_lists_store: store::PostingsLists,
-) -> MResult<Option<(&'a str, &'a str)>> {
+fn split_best_frequency<'a>(word: &'a str, engine: &dyn DataStore) -> MResult<Option<(&'a str, &'a str)>> {
     let chars = word.char_indices().skip(1);
     let mut best = None;
 
     for (i, _) in chars {
         let (left, right) = word.split_at(i);
 
-        let left_freq = postings_lists_store
-            .postings_list(reader, left.as_ref())?
+        let left_freq = engine
+            .postings_list(left.as_ref(), None)
             .map_or(0, |i| i.len());
 
-        let right_freq = postings_lists_store
-            .postings_list(reader, right.as_ref())?
+        let right_freq = engine
+            .postings_list(right.as_ref(), None)
             .map_or(0, |i| i.len());
 
         let min_freq = cmp::min(left_freq, right_freq);
@@ -160,17 +142,16 @@ fn split_best_frequency<'a>(
 }
 
 fn generate_automatons(
-    reader: &heed::RoTxn<MainT>,
     query: &str,
-    main_store: store::Main,
-    postings_lists_store: store::PostingsLists,
-    synonym_store: store::Synonyms,
+    engine: &dyn DataStore,
 ) -> MResult<(Vec<AutomatonGroup>, QueryEnhancer)> {
     let has_end_whitespace = query.chars().last().map_or(false, char::is_whitespace);
     let query_words: Vec<_> = split_query_string(query).map(str::to_lowercase).collect();
-    let synonyms = match main_store.synonyms_fst(reader)? {
+
+    let default = fst::Set::default();
+    let synonyms = match engine.synonyms_fst() {
         Some(synonym) => synonym,
-        None => fst::Set::default(),
+        None => &default,
     };
 
     let mut automaton_index = 0;
@@ -225,7 +206,7 @@ fn generate_automatons(
                     continue;
                 }
 
-                if let Some(synonyms) = synonym_store.synonyms(reader, base.as_bytes())? {
+                if let Some(synonyms) = engine.synonyms(base.as_bytes()) {
                     let mut stream = synonyms.into_stream();
                     while let Some(synonyms) = stream.next() {
                         let synonyms = std::str::from_utf8(synonyms).unwrap();
@@ -254,7 +235,7 @@ fn generate_automatons(
 
             if n == 1 {
                 if let Some((left, right)) =
-                    split_best_frequency(reader, &normalized, postings_lists_store)?
+                    split_best_frequency(&normalized, engine)?
                 {
                     let a = Automaton::exact(automaton_index, 1, left);
                     enhancer_builder.declare(query_range.clone(), automaton_index, &[left]);
