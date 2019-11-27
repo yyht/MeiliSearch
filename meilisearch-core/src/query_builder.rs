@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 use std::{cmp, mem};
 
 use fst::{IntoStreamer, Streamer};
-use sdset::SetBuf;
-use slice_group_by::{GroupBy, GroupByMut};
 use hashbrown::HashMap;
 use meilisearch_schema::SchemaAttr;
+use meilisearch_types::AttrCount;
+use sdset::SetBuf;
+use slice_group_by::{GroupBy, GroupByMut};
 
 use crate::database::MainT;
 use crate::automaton::{Automaton, AutomatonGroup, AutomatonProducer, QueryEnhancer};
@@ -26,7 +27,7 @@ pub trait DataStore {
     fn synonyms_fst(&self) -> Option<&fst::Set>;
     fn synonyms(&self, word: &[u8]) -> Option<fst::Set>;
 
-    fn fields_counts(&self, id: DocumentId) -> Vec<(SchemaAttr, u64)>;
+    fn fields_counts(&self, id: DocumentId) -> Cow<[AttrCount]>;
 }
 
 struct StoreEngine<'r> {
@@ -55,7 +56,7 @@ impl<'r> DataStore for StoreEngine<'r> {
         unimplemented!()
     }
 
-    fn fields_counts(&self, id: DocumentId) -> Vec<(SchemaAttr, u64)> {
+    fn fields_counts(&self, id: DocumentId) -> Cow<[AttrCount]> {
         unimplemented!()
     }
 }
@@ -301,9 +302,9 @@ fn fetch_raw_documents(
         let mut fields_counts = Vec::new();
         for group in matches.linear_group_by_key(|(id, ..)| *id) {
             let id = group[0].0;
-            for (attr, count) in engine.fields_counts(id) {
+            for AttrCount { attr, count } in engine.fields_counts(id).iter().cloned() {
                 // let (attr, count) = result?;
-                fields_counts.push((id, attr, count));
+                fields_counts.push((id, SchemaAttr(attr), count));
             }
         }
         SetBuf::new(fields_counts).unwrap()
@@ -814,7 +815,7 @@ mod tests {
 
             let mut words_fst = BTreeSet::new();
             let mut postings_lists = HashMap::new();
-            let mut fields_counts = HashMap::<_, u64>::new();
+            let mut fields_counts = HashMap::<_, u16>::new();
 
             for (word, indexes) in iter {
                 let word = word.to_lowercase().into_bytes();
