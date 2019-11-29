@@ -7,6 +7,7 @@ use std::{cmp, mem};
 
 use fst::{IntoStreamer, Streamer};
 use hashbrown::HashMap;
+use log::debug;
 use meilisearch_schema::SchemaAttr;
 use meilisearch_types::AttrCount;
 use sdset::SetBuf;
@@ -192,22 +193,14 @@ fn fetch_raw_documents(
     let mut matches = Vec::new();
     let mut highlights = Vec::new();
 
+    let before_automatons_groups_loop = Instant::now();
     for group in automatons_groups {
-        let AutomatonGroup {
-            is_phrase_query,
-            automatons,
-        } = group;
+        let AutomatonGroup { is_phrase_query, automatons } = group;
         let phrase_query_len = automatons.len();
 
         let mut tmp_matches = Vec::new();
         for (id, automaton) in automatons.into_iter().enumerate() {
-            let Automaton {
-                index,
-                is_exact,
-                query_len,
-                query,
-                ..
-            } = automaton;
+            let Automaton { index, is_exact, query_len, query, .. } = automaton;
             let dfa = automaton.dfa();
 
             let words = match engine.words_fst() {
@@ -291,26 +284,27 @@ fn fetch_raw_documents(
             }
         }
     }
+    debug!("automatons_groups_loop took {:.02?}", before_automatons_groups_loop.elapsed());
 
+    let before_multiword_rewrite_matches = Instant::now();
     let matches = multiword_rewrite_matches(matches, &query_enhancer);
+    debug!("multiword_rewrite_matches took {:.02?}", before_multiword_rewrite_matches.elapsed());
+
+    let before_highlight_sorting = Instant::now();
     let highlights = {
         highlights.sort_unstable_by_key(|(id, _)| *id);
         SetBuf::new_unchecked(highlights)
     };
+    debug!("highlight_sorting {:.02?}", before_highlight_sorting.elapsed());
 
-    let fields_counts = {
-        let mut fields_counts = Vec::new();
-        for group in matches.linear_group_by_key(|(id, ..)| *id) {
-            let id = group[0].0;
-            for AttrCount { attr, count } in engine.fields_counts(id).iter().cloned() {
-                // let (attr, count) = result?;
-                fields_counts.push((id, SchemaAttr(attr), count));
-            }
-        }
-        SetBuf::new(fields_counts).unwrap()
-    };
+    debug!("the matches length is {}", matches.len());
 
-    Ok(raw_documents_from(matches, highlights, fields_counts))
+    let before_raw_documents = Instant::now();
+    let raw_documents = raw_documents_from(matches, highlights);
+    debug!("raw_documents took {:.02?}", before_raw_documents.elapsed());
+    debug!("documents to worry about: {}", raw_documents.len());
+
+    Ok(raw_documents)
 }
 
 impl<'c, 'f, 'd> QueryBuilder<'c, 'f, 'd> {
@@ -456,6 +450,11 @@ where
     for auts in automaton_producer {
         automatons.push(auts);
 
+        for (i, group) in automatons.iter().enumerate() {
+            debug!("group {} automatons {:?}", i, group.automatons);
+        }
+
+        let before_fetch_raw_documents = Instant::now();
         // we must retrieve the documents associated
         // with the current automatons
         let mut raw_documents = fetch_raw_documents(
@@ -464,6 +463,7 @@ where
             searchable_attrs.as_ref(),
             engine,
         )?;
+        debug!("fetch_raw_documents took {:.02?}", before_fetch_raw_documents.elapsed());
 
         // stop processing when time is running out
         if let Some(timeout) = timeout {
@@ -485,6 +485,16 @@ where
                     documents_seen += group.len();
                     groups.push(group);
                     continue;
+                }
+
+                // we must pull the fields counts of these documents
+                // TODO it would be great to had a "dependency" thing for each criterion
+                //      and make it so that we can be lazy on pulling/computing some data.
+                if criterion.name() == "Exact" {
+                    for document in group.iter_mut() {
+                        let fields_counts = SetBuf::new(engine.fields_counts(document.id).into_owned()).unwrap();
+                        document.fields_counts = Some(fields_counts);
+                    }
                 }
 
                 group.sort_unstable_by(|a, b| criterion.evaluate(a, b));
