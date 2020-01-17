@@ -12,7 +12,7 @@ pub use self::customs_update::{apply_customs_update, push_customs_update};
 pub use self::documents_addition::{
     apply_documents_addition, apply_documents_partial_addition, DocumentsAddition,
 };
-pub use self::documents_deletion::{apply_documents_deletion, DocumentsDeletion};
+pub use self::documents_deletion::{apply_documents_deletion, DocumentsDeletion, AlterDocumentIds};
 pub use self::schema_update::{apply_schema_update, push_schema_update};
 pub use self::stop_words_addition::{apply_stop_words_addition, StopWordsAddition};
 pub use self::stop_words_deletion::{apply_stop_words_deletion, StopWordsDeletion};
@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use fst::{IntoStreamer, Streamer};
 use sdset::Set;
 
-use crate::{store, DocumentId, MResult};
+use crate::{store, MResult};
 use crate::database::{MainT, UpdateT};
 use meilisearch_schema::Schema;
 
@@ -75,7 +75,7 @@ impl Update {
         }
     }
 
-    fn documents_deletion(data: Vec<DocumentId>) -> Update {
+    fn documents_deletion(data: Vec<String>) -> Update {
         Update {
             data: UpdateData::DocumentsDeletion(data),
             enqueued_at: Utc::now(),
@@ -111,7 +111,7 @@ pub enum UpdateData {
     Customs(Vec<u8>),
     DocumentsAddition(Vec<HashMap<String, serde_json::Value>>),
     DocumentsPartial(Vec<HashMap<String, serde_json::Value>>),
-    DocumentsDeletion(Vec<DocumentId>),
+    DocumentsDeletion(Vec<String>),
     SynonymsUpdate(BTreeMap<String, Vec<String>>),
     StopWordsAddition(BTreeSet<String>),
     StopWordsDeletion(BTreeSet<String>),
@@ -306,7 +306,7 @@ pub fn update_task<'a, 'b>(
                 number: documents.len(),
             };
 
-            let result = apply_documents_deletion(writer, index, documents);
+            let result = apply_documents_deletion(writer, index, documents, AlterDocumentIds::Erase);
 
             (update_type, result, start.elapsed())
         }

@@ -1,16 +1,18 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 
 use fst::{set::OpBuilder, SetBuilder};
+use itertools::{merge_join_by, EitherOrBoth};
 use sdset::{duo::Union, SetOperation};
 use serde::{Deserialize, Serialize};
 
 use crate::database::{MainT, UpdateT};
 use crate::database::{UpdateEvent, UpdateEventsEmitter};
 use crate::raw_indexer::RawIndexer;
-use crate::serde::{extract_document_id, serialize_value, Deserializer, Serializer};
+use crate::serde::{extract_user_id, serialize_value, Deserializer, Serializer};
 use crate::store;
-use crate::update::{apply_documents_deletion, compute_short_prefixes, next_update_id, Update};
-use crate::{Error, MResult, RankedMap};
+use crate::update::{apply_documents_deletion, compute_short_prefixes, next_update_id};
+use crate::update::{Update, AlterDocumentIds};
+use crate::{Error, MResult, RankedMap, DocumentId};
 
 pub struct DocumentsAddition<D> {
     updates_store: store::Updates,
@@ -107,7 +109,7 @@ pub fn apply_documents_addition<'a, 'b>(
     index: &store::Index,
     addition: Vec<HashMap<String, serde_json::Value>>,
 ) -> MResult<()> {
-    let mut documents_additions = HashMap::new();
+    let mut documents_additions = BTreeMap::new();
 
     let schema = match index.main.schema(writer)? {
         Some(schema) => schema,
@@ -118,18 +120,18 @@ pub fn apply_documents_addition<'a, 'b>(
 
     // 1. store documents ids for future deletion
     for document in addition {
-        let document_id = match extract_document_id(identifier, &document)? {
+        let user_id = match extract_user_id(identifier, &document)? {
             Some(id) => id,
             None => return Err(Error::MissingDocumentId),
         };
 
-        documents_additions.insert(document_id, document);
+        documents_additions.insert(user_id, document);
     }
 
     // 2. remove the documents posting lists
     let number_of_inserted_documents = documents_additions.len();
-    let documents_ids = documents_additions.iter().map(|(id, _)| *id).collect();
-    apply_documents_deletion(writer, index, documents_ids)?;
+    let documents_ids = documents_additions.iter().map(|(id, _)| id.clone()).collect();
+    apply_documents_deletion(writer, index, documents_ids, AlterDocumentIds::Keep)?;
 
     let mut ranked_map = match index.main.ranked_map(writer)? {
         Some(ranked_map) => ranked_map,
@@ -141,10 +143,13 @@ pub fn apply_documents_addition<'a, 'b>(
         None => fst::Set::default(),
     };
 
-    // 3. index the documents fields in the stores
+    // 3. compute the documents ids
+    let identified_documents = identify_documents(writer, index, documents_additions)?;
+
+    // 4. index the documents fields in the stores
     let mut indexer = RawIndexer::new(stop_words);
 
-    for (document_id, document) in documents_additions {
+    for (document_id, document) in identified_documents {
         let serializer = Serializer {
             txn: writer,
             schema: &schema,
@@ -176,7 +181,7 @@ pub fn apply_documents_partial_addition<'a, 'b>(
     index: &store::Index,
     addition: Vec<HashMap<String, serde_json::Value>>,
 ) -> MResult<()> {
-    let mut documents_additions = HashMap::new();
+    let mut documents_additions = BTreeMap::new();
 
     let schema = match index.main.schema(writer)? {
         Some(schema) => schema,
@@ -187,35 +192,37 @@ pub fn apply_documents_partial_addition<'a, 'b>(
 
     // 1. store documents ids for future deletion
     for mut document in addition {
-        let document_id = match extract_document_id(identifier, &document)? {
+        let user_id = match extract_user_id(identifier, &document)? {
             Some(id) => id,
             None => return Err(Error::MissingDocumentId),
         };
 
-        let mut deserializer = Deserializer {
-            document_id,
-            reader: writer,
-            documents_fields: index.documents_fields,
-            schema: &schema,
-            attributes: None,
-        };
+        if let Some(document_id) = index.user_id_to_document_id.document_id(writer, &user_id)? {
+            let mut deserializer = Deserializer {
+                document_id,
+                reader: writer,
+                documents_fields: index.documents_fields,
+                schema: &schema,
+                attributes: None,
+            };
 
-        // retrieve the old document and
-        // update the new one with missing keys found in the old one
-        let result = Option::<HashMap<String, serde_json::Value>>::deserialize(&mut deserializer)?;
-        if let Some(old_document) = result {
-            for (key, value) in old_document {
-                document.entry(key).or_insert(value);
+            // retrieve the old document and
+            // update the new one with missing keys found in the old one
+            let result = Option::<HashMap<String, serde_json::Value>>::deserialize(&mut deserializer)?;
+            if let Some(old_document) = result {
+                for (key, value) in old_document {
+                    document.entry(key).or_insert(value);
+                }
             }
         }
 
-        documents_additions.insert(document_id, document);
+        documents_additions.insert(user_id, document);
     }
 
     // 2. remove the documents posting lists
     let number_of_inserted_documents = documents_additions.len();
-    let documents_ids = documents_additions.iter().map(|(id, _)| *id).collect();
-    apply_documents_deletion(writer, index, documents_ids)?;
+    let documents_ids = documents_additions.iter().map(|(id, _)| id.clone()).collect();
+    apply_documents_deletion(writer, index, documents_ids, AlterDocumentIds::Keep)?;
 
     let mut ranked_map = match index.main.ranked_map(writer)? {
         Some(ranked_map) => ranked_map,
@@ -227,10 +234,13 @@ pub fn apply_documents_partial_addition<'a, 'b>(
         None => fst::Set::default(),
     };
 
-    // 3. index the documents fields in the stores
+    // 3. compute the documents ids
+    let identified_documents = identify_documents(writer, index, documents_additions)?;
+
+    // 4. index the documents fields in the stores
     let mut indexer = RawIndexer::new(stop_words);
 
-    for (document_id, document) in documents_additions {
+    for (document_id, document) in identified_documents {
         let serializer = Serializer {
             txn: writer,
             schema: &schema,
@@ -257,6 +267,43 @@ pub fn apply_documents_partial_addition<'a, 'b>(
     Ok(())
 }
 
+fn identify_documents<'a, 'b>(
+    writer: &'a mut heed::RwTxn<'b, MainT>,
+    index: &store::Index,
+    documents_additions: BTreeMap<String, HashMap<String, serde_json::Value>>,
+) -> MResult<HashMap<DocumentId, HashMap<String, serde_json::Value>>>
+{
+    // 3. compute the documents ids
+    let known_documents_ids = index.user_id_to_document_id.iter(writer)?;
+    let known_documents_ids: Result<Vec<(&str, DocumentId)>, _> = known_documents_ids.collect();
+    let known_documents_ids = known_documents_ids?;
+
+    let documents_ids = documents_additions.into_iter();
+    let merge = merge_join_by(known_documents_ids, documents_ids, |(a, _), (b, _)| a.cmp(&b.as_str()));
+
+    let mut identified_documents = HashMap::new();
+    let mut non_identified_documents = Vec::new();
+    for eob in merge {
+        match eob {
+            EitherOrBoth::Left(_) => (),
+            EitherOrBoth::Both((_, id), (_, doc)) => { identified_documents.insert(id, doc); },
+            EitherOrBoth::Right((id, doc)) => non_identified_documents.push((id, doc)),
+        }
+    }
+
+    // 4. compute the documents ids for the unknown documents
+    let remaining = non_identified_documents.len();
+    let available_ids = index.document_id_to_user_id.next_available_documents_ids(writer, remaining)?;
+
+    for (document_id, (user_id, doc)) in available_ids.into_iter().zip(non_identified_documents) {
+        index.user_id_to_document_id.put_user_id(writer, &user_id, document_id)?;
+        index.document_id_to_user_id.put_document_id(writer, document_id, &user_id)?;
+        identified_documents.insert(document_id, doc);
+    }
+
+    Ok(identified_documents)
+}
+
 pub fn reindex_all_documents(writer: &mut heed::RwTxn<MainT>, index: &store::Index) -> MResult<()> {
     let schema = match index.main.schema(writer)? {
         Some(schema) => schema,
@@ -267,8 +314,8 @@ pub fn reindex_all_documents(writer: &mut heed::RwTxn<MainT>, index: &store::Ind
 
     // 1. retrieve all documents ids
     let mut documents_ids_to_reindex = Vec::new();
-    for result in index.documents_fields_counts.documents_ids(writer)? {
-        let document_id = result?;
+    for result in index.user_id_to_document_id.iter(writer)? {
+        let (_, document_id) = result?;
         documents_ids_to_reindex.push(document_id);
     }
 
@@ -276,6 +323,7 @@ pub fn reindex_all_documents(writer: &mut heed::RwTxn<MainT>, index: &store::Ind
     index.main.put_words_fst(writer, &fst::Set::default())?;
     index.main.put_ranked_map(writer, &ranked_map)?;
     index.main.put_number_of_documents(writer, |_| 0)?;
+    index.documents_fields_counts.clear(writer)?;
     index.postings_lists.clear(writer)?;
     index.docs_words.clear(writer)?;
 

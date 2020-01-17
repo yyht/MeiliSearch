@@ -1,20 +1,16 @@
-use std::hash::{Hash, Hasher};
-
-use crate::DocumentId;
 use serde::{ser, Serialize};
 use serde_json::Value;
-use siphasher::sip::SipHasher;
 
 use super::{ConvertToString, SerializerError};
 
-pub fn extract_document_id<D>(
+pub fn extract_user_id<D>(
     identifier: &str,
     document: &D,
-) -> Result<Option<DocumentId>, SerializerError>
+) -> Result<Option<String>, SerializerError>
 where
     D: serde::Serialize,
 {
-    let serializer = ExtractDocumentId { identifier };
+    let serializer = ExtractUserId { identifier };
     document.serialize(serializer)
 }
 
@@ -29,19 +25,12 @@ pub fn value_to_string(value: &Value) -> Option<String> {
     }
 }
 
-pub fn compute_document_id<H: Hash>(t: H) -> DocumentId {
-    let mut s = SipHasher::new();
-    t.hash(&mut s);
-    let hash = s.finish();
-    DocumentId(hash)
-}
-
-struct ExtractDocumentId<'a> {
+struct ExtractUserId<'a> {
     identifier: &'a str,
 }
 
-impl<'a> ser::Serializer for ExtractDocumentId<'a> {
-    type Ok = Option<DocumentId>;
+impl<'a> ser::Serializer for ExtractUserId<'a> {
+    type Ok = Option<String>;
     type Error = SerializerError;
     type SerializeSeq = ser::Impossible<Self::Ok, Self::Error>;
     type SerializeTuple = ser::Impossible<Self::Ok, Self::Error>;
@@ -79,7 +68,7 @@ impl<'a> ser::Serializer for ExtractDocumentId<'a> {
 
     fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
         Err(SerializerError::UnserializableType {
-            type_name: "Option",
+            type_name: "Option"
         })
     }
 
@@ -88,7 +77,7 @@ impl<'a> ser::Serializer for ExtractDocumentId<'a> {
         T: Serialize,
     {
         Err(SerializerError::UnserializableType {
-            type_name: "Option",
+            type_name: "Option"
         })
     }
 
@@ -98,7 +87,7 @@ impl<'a> ser::Serializer for ExtractDocumentId<'a> {
 
     fn serialize_unit_struct(self, _name: &'static str) -> Result<Self::Ok, Self::Error> {
         Err(SerializerError::UnserializableType {
-            type_name: "unit struct",
+            type_name: "unit struct"
         })
     }
 
@@ -209,12 +198,12 @@ impl<'a> ser::Serializer for ExtractDocumentId<'a> {
 
 pub struct ExtractDocumentIdMapSerializer<'a> {
     identifier: &'a str,
-    document_id: Option<DocumentId>,
+    document_id: Option<String>,
     current_key_name: Option<String>,
 }
 
 impl<'a> ser::SerializeMap for ExtractDocumentIdMapSerializer<'a> {
-    type Ok = Option<DocumentId>;
+    type Ok = Option<String>;
     type Error = SerializerError;
 
     fn serialize_key<T: ?Sized>(&mut self, key: &T) -> Result<(), Self::Error>
@@ -247,7 +236,7 @@ impl<'a> ser::SerializeMap for ExtractDocumentIdMapSerializer<'a> {
 
         if self.identifier == key {
             let value = serde_json::to_string(value).and_then(|s| serde_json::from_str(&s))?;
-            match value_to_string(&value).map(|s| compute_document_id(&s)) {
+            match value_to_string(&value) {
                 Some(document_id) => self.document_id = Some(document_id),
                 None => return Err(SerializerError::InvalidDocumentIdType),
             }
@@ -263,11 +252,11 @@ impl<'a> ser::SerializeMap for ExtractDocumentIdMapSerializer<'a> {
 
 pub struct ExtractDocumentIdStructSerializer<'a> {
     identifier: &'a str,
-    document_id: Option<DocumentId>,
+    document_id: Option<String>,
 }
 
 impl<'a> ser::SerializeStruct for ExtractDocumentIdStructSerializer<'a> {
-    type Ok = Option<DocumentId>;
+    type Ok = Option<String>;
     type Error = SerializerError;
 
     fn serialize_field<T: ?Sized>(
@@ -280,7 +269,7 @@ impl<'a> ser::SerializeStruct for ExtractDocumentIdStructSerializer<'a> {
     {
         if self.identifier == key {
             let value = serde_json::to_string(value).and_then(|s| serde_json::from_str(&s))?;
-            match value_to_string(&value).map(compute_document_id) {
+            match value_to_string(&value) {
                 Some(document_id) => self.document_id = Some(document_id),
                 None => return Err(SerializerError::InvalidDocumentIdType),
             }

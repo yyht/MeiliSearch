@@ -17,20 +17,27 @@ pub async fn get_document(ctx: Context<Data>) -> SResult<Response> {
     ctx.is_allowed(DocumentsRead)?;
 
     let index = ctx.index()?;
-
-    let identifier = ctx.identifier()?;
-    let document_id = meilisearch_core::serde::compute_document_id(identifier.clone());
+    let user_id = ctx.identifier()?;
 
     let db = &ctx.state().db;
     let reader = db.main_read_txn().map_err(ResponseError::internal)?;
 
+    let result = index.user_id_to_document_id
+        .document_id(&reader, &user_id)
+        .map_err(ResponseError::internal)?;
+
+    let document_id = match result {
+        Some(document_id) => document_id,
+        None => return Err(ResponseError::document_not_found(user_id)),
+    };
+
     let response = index
         .document::<IndexMap<String, Value>>(&reader, None, document_id)
         .map_err(ResponseError::internal)?
-        .ok_or(ResponseError::document_not_found(&identifier))?;
+        .ok_or(ResponseError::document_not_found(&user_id))?;
 
     if response.is_empty() {
-        return Err(ResponseError::document_not_found(identifier));
+        return Err(ResponseError::document_not_found(user_id));
     }
 
     Ok(tide::response::json(response))
@@ -46,8 +53,7 @@ pub async fn delete_document(ctx: Context<Data>) -> SResult<Response> {
     ctx.is_allowed(DocumentsWrite)?;
 
     let index = ctx.index()?;
-    let identifier = ctx.identifier()?;
-    let document_id = meilisearch_core::serde::compute_document_id(identifier.clone());
+    let document_id = ctx.identifier()?;
 
     let db = &ctx.state().db;
     let mut update_writer = db.update_write_txn().map_err(ResponseError::internal)?;
@@ -87,8 +93,10 @@ pub async fn get_all_documents(ctx: Context<Data>) -> SResult<Response> {
     let reader = db.main_read_txn().map_err(ResponseError::internal)?;
 
     let documents_ids: Result<BTreeSet<_>, _> =
-        match index.documents_fields_counts.documents_ids(&reader) {
-            Ok(documents_ids) => documents_ids.skip(offset).take(limit).collect(),
+        match index.document_id_to_user_id.iter(&reader) {
+            Ok(documents_ids) => {
+                documents_ids.map(|r| r.map(|(id, _)| id)).skip(offset).take(limit).collect()
+            },
             Err(e) => return Err(ResponseError::internal(e)),
         };
 
@@ -208,8 +216,7 @@ pub async fn delete_multiple_documents(mut ctx: Context<Data>) -> SResult<Respon
 
     for identifier in data {
         if let Some(identifier) = meilisearch_core::serde::value_to_string(&identifier) {
-            documents_deletion
-                .delete_document_by_id(meilisearch_core::serde::compute_document_id(identifier));
+            documents_deletion.delete_document_by_id(identifier);
         }
     }
 

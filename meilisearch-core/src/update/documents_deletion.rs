@@ -6,16 +6,22 @@ use sdset::{duo::DifferenceByKey, SetBuf, SetOperation};
 
 use crate::database::{MainT, UpdateT};
 use crate::database::{UpdateEvent, UpdateEventsEmitter};
-use crate::serde::extract_document_id;
+use crate::serde::extract_user_id;
 use crate::store;
 use crate::update::{next_update_id, compute_short_prefixes, Update};
-use crate::{DocumentId, Error, MResult, RankedMap};
+use crate::{Error, MResult, RankedMap};
+
+#[derive(Debug, Copy, Clone)]
+pub enum AlterDocumentIds {
+    Keep,
+    Erase,
+}
 
 pub struct DocumentsDeletion {
     updates_store: store::Updates,
     updates_results_store: store::UpdatesResults,
     updates_notifier: UpdateEventsEmitter,
-    documents: Vec<DocumentId>,
+    user_ids: Vec<String>,
 }
 
 impl DocumentsDeletion {
@@ -28,25 +34,24 @@ impl DocumentsDeletion {
             updates_store,
             updates_results_store,
             updates_notifier,
-            documents: Vec::new(),
+            user_ids: Vec::new(),
         }
     }
 
-    pub fn delete_document_by_id(&mut self, document_id: DocumentId) {
-        self.documents.push(document_id);
+    pub fn delete_document_by_id(&mut self, user_id: String) {
+        self.user_ids.push(user_id);
     }
 
     pub fn delete_document<D>(&mut self, schema: &Schema, document: D) -> MResult<()>
-    where
-        D: serde::Serialize,
+    where D: serde::Serialize,
     {
         let identifier = schema.identifier_name();
-        let document_id = match extract_document_id(identifier, &document)? {
+        let user_id = match extract_user_id(identifier, &document)? {
             Some(id) => id,
             None => return Err(Error::MissingDocumentId),
         };
 
-        self.delete_document_by_id(document_id);
+        self.delete_document_by_id(user_id);
 
         Ok(())
     }
@@ -57,15 +62,9 @@ impl DocumentsDeletion {
             writer,
             self.updates_store,
             self.updates_results_store,
-            self.documents,
+            self.user_ids,
         )?;
         Ok(update_id)
-    }
-}
-
-impl Extend<DocumentId> for DocumentsDeletion {
-    fn extend<T: IntoIterator<Item = DocumentId>>(&mut self, iter: T) {
-        self.documents.extend(iter)
     }
 }
 
@@ -73,7 +72,7 @@ pub fn push_documents_deletion(
     writer: &mut heed::RwTxn<UpdateT>,
     updates_store: store::Updates,
     updates_results_store: store::UpdatesResults,
-    deletion: Vec<DocumentId>,
+    deletion: Vec<String>,
 ) -> MResult<u64> {
     let last_update_id = next_update_id(writer, updates_store, updates_results_store)?;
 
@@ -86,9 +85,22 @@ pub fn push_documents_deletion(
 pub fn apply_documents_deletion(
     writer: &mut heed::RwTxn<MainT>,
     index: &store::Index,
-    deletion: Vec<DocumentId>,
+    deletion: Vec<String>,
+    docids_alteration: AlterDocumentIds,
 ) -> MResult<()> {
-    let idset = SetBuf::from_dirty(deletion);
+
+    let mut document_ids = Vec::with_capacity(deletion.len());
+    for user_id in deletion {
+        if let Some(document_id) = index.user_id_to_document_id.document_id(writer, &user_id)? {
+            document_ids.push(document_id);
+            if let AlterDocumentIds::Erase = docids_alteration {
+                index.user_id_to_document_id.del_user_id(writer, &user_id)?;
+                index.document_id_to_user_id.del_document_id(writer, document_id)?;
+            }
+        }
+    }
+
+    let idset = SetBuf::from_dirty(document_ids);
 
     let schema = match index.main.schema(writer)? {
         Some(schema) => schema,
@@ -103,15 +115,7 @@ pub fn apply_documents_deletion(
     // collect the ranked attributes according to the schema
     let ranked_attrs: Vec<_> = schema
         .iter()
-        .filter_map(
-            |(_, attr, prop)| {
-                if prop.is_ranked() {
-                    Some(attr)
-                } else {
-                    None
-                }
-            },
-        )
+        .filter_map(|(_, attr, prop)| if prop.is_ranked() { Some(attr) } else { None })
         .collect();
 
     let mut words_document_ids = HashMap::new();

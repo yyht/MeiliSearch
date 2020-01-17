@@ -33,7 +33,7 @@ impl UserIdToDocumentId {
         self.user_id_to_document_id.clear(writer)
     }
 
-    pub fn user_id<'txn>(
+    pub fn document_id<'txn>(
         self,
         reader: &'txn heed::RoTxn<MainT>,
         user_id: &str,
@@ -42,6 +42,26 @@ impl UserIdToDocumentId {
         match self.user_id_to_document_id.get(reader, user_id)? {
             Some(id) => Ok(Some(DocumentId(id))),
             None => Ok(None),
+        }
+    }
+
+    pub fn iter(self, reader: &heed::RoTxn<MainT>) -> ZResult<UserIdToDocumentIdIter> {
+        Ok(UserIdToDocumentIdIter { iter: self.user_id_to_document_id.iter(reader)? })
+    }
+}
+
+pub struct UserIdToDocumentIdIter<'txn> {
+    iter: heed::RoIter<'txn, Str, OwnedType<u64>>,
+}
+
+impl<'txn> Iterator for UserIdToDocumentIdIter<'txn> {
+    type Item = ZResult<(&'txn str, DocumentId)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.iter.next() {
+            Some(Ok((user_id, document_id))) => Some(Ok((user_id, DocumentId(document_id)))),
+            Some(Err(e)) => Some(Err(e)),
+            None => None,
         }
     }
 }

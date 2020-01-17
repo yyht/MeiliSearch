@@ -46,29 +46,6 @@ impl DocumentIdToUserId {
         self.document_id_to_user_id.get(reader, &id)
     }
 
-    pub fn next_available_document_id(self, reader: &heed::RoTxn<MainT>) -> ZResult<DocumentId> {
-        let mut previous: Option<u64> = None;
-
-        for result in self.document_id_to_user_id.iter(reader)? {
-            let (document_id, _) = result?;
-            let document_id = document_id.get();
-
-            if let Some(previous) = previous {
-                let next = previous.checked_add(1).unwrap();
-                if next != document_id {
-                    return Ok(DocumentId(next));
-                }
-            }
-
-            previous = Some(document_id);
-        }
-
-        match previous {
-            Some(previous) => Ok(DocumentId(previous.checked_add(1).unwrap())),
-            None => Ok(DocumentId(0)),
-        }
-    }
-
     pub fn next_available_documents_ids(
         self,
         reader: &heed::RoTxn<MainT>,
@@ -100,4 +77,28 @@ impl DocumentIdToUserId {
 
         Ok(documents_ids)
     }
+
+    pub fn iter(self, reader: &heed::RoTxn<MainT>) -> ZResult<DocumentIdToUserIdIter> {
+        Ok(DocumentIdToUserIdIter { iter: self.document_id_to_user_id.iter(reader)? })
+    }
 }
+
+pub struct DocumentIdToUserIdIter<'txn> {
+    iter: heed::RoIter<'txn, OwnedType<BEU64>, Str>,
+}
+
+impl<'txn> Iterator for DocumentIdToUserIdIter<'txn> {
+    type Item = ZResult<(DocumentId, &'txn str)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.iter.next() {
+            Some(Ok((document_id, user_id))) => {
+                let document_id = document_id.get();
+                Some(Ok((DocumentId(document_id), user_id)))
+            },
+            Some(Err(e)) => Some(Err(e)),
+            None => None,
+        }
+    }
+}
+

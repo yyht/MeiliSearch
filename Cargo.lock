@@ -974,7 +974,6 @@ dependencies = [
  "sdset 0.3.6 (git+https://github.com/Kerollmops/sdset?branch=typed-algorithms)",
  "serde 1.0.102 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_json 1.0.41 (registry+https://github.com/rust-lang/crates.io-index)",
- "siphasher 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "slice-group-by 0.2.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "structopt 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "tempfile 3.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
