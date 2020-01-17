@@ -8,6 +8,8 @@ mod postings_lists;
 mod synonyms;
 mod updates;
 mod updates_results;
+mod document_id_to_user_id;
+mod user_id_to_document_id;
 
 pub use self::docs_words::DocsWords;
 pub use self::prefix_documents_cache::PrefixDocumentsCache;
@@ -21,6 +23,8 @@ pub use self::postings_lists::PostingsLists;
 pub use self::synonyms::Synonyms;
 pub use self::updates::Updates;
 pub use self::updates_results::UpdatesResults;
+pub use self::document_id_to_user_id::DocumentIdToUserId;
+pub use self::user_id_to_document_id::UserIdToDocumentId;
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -144,6 +148,14 @@ fn main_name(name: &str) -> String {
     format!("store-{}", name)
 }
 
+fn document_id_to_user_id_name(name: &str) -> String {
+    format!("store-{}-document-id-to-user-id", name)
+}
+
+fn user_id_to_document_id_name(name: &str) -> String {
+    format!("store-{}-user-id-to-document-id", name)
+}
+
 fn postings_lists_name(name: &str) -> String {
     format!("store-{}-postings-lists", name)
 }
@@ -183,6 +195,8 @@ fn updates_results_name(name: &str) -> String {
 #[derive(Clone)]
 pub struct Index {
     pub main: Main,
+    pub document_id_to_user_id: DocumentIdToUserId,
+    pub user_id_to_document_id: UserIdToDocumentId,
     pub postings_lists: PostingsLists,
     pub documents_fields: DocumentsFields,
     pub documents_fields_counts: DocumentsFieldsCounts,
@@ -381,6 +395,8 @@ pub fn create(
 ) -> MResult<Index> {
     // create all the store names
     let main_name = main_name(name);
+    let document_id_to_user_id_name = document_id_to_user_id_name(name);
+    let user_id_to_document_id_name = user_id_to_document_id_name(name);
     let postings_lists_name = postings_lists_name(name);
     let documents_fields_name = documents_fields_name(name);
     let documents_fields_counts_name = documents_fields_counts_name(name);
@@ -393,6 +409,8 @@ pub fn create(
 
     // open all the stores
     let main = env.create_poly_database(Some(&main_name))?;
+    let document_id_to_user_id = env.create_database(Some(&document_id_to_user_id_name))?;
+    let user_id_to_document_id = env.create_database(Some(&user_id_to_document_id_name))?;
     let postings_lists = env.create_database(Some(&postings_lists_name))?;
     let documents_fields = env.create_database(Some(&documents_fields_name))?;
     let documents_fields_counts = env.create_database(Some(&documents_fields_counts_name))?;
@@ -405,6 +423,8 @@ pub fn create(
 
     Ok(Index {
         main: Main { main },
+        document_id_to_user_id: DocumentIdToUserId { document_id_to_user_id },
+        user_id_to_document_id: UserIdToDocumentId { user_id_to_document_id },
         postings_lists: PostingsLists { postings_lists },
         documents_fields: DocumentsFields { documents_fields },
         documents_fields_counts: DocumentsFieldsCounts { documents_fields_counts },
@@ -426,6 +446,8 @@ pub fn open(
 ) -> MResult<Option<Index>> {
     // create all the store names
     let main_name = main_name(name);
+    let document_id_to_user_id_name = document_id_to_user_id_name(name);
+    let user_id_to_document_id_name = user_id_to_document_id_name(name);
     let postings_lists_name = postings_lists_name(name);
     let documents_fields_name = documents_fields_name(name);
     let documents_fields_counts_name = documents_fields_counts_name(name);
@@ -439,6 +461,14 @@ pub fn open(
     // open all the stores
     let main = match env.open_poly_database(Some(&main_name))? {
         Some(main) => main,
+        None => return Ok(None),
+    };
+    let document_id_to_user_id = match env.open_database(Some(&document_id_to_user_id_name))? {
+        Some(document_id_to_user_id) => document_id_to_user_id,
+        None => return Ok(None),
+    };
+    let user_id_to_document_id = match env.open_database(Some(&user_id_to_document_id_name))? {
+        Some(user_id_to_document_id) => user_id_to_document_id,
         None => return Ok(None),
     };
     let postings_lists = match env.open_database(Some(&postings_lists_name))? {
@@ -480,6 +510,8 @@ pub fn open(
 
     Ok(Some(Index {
         main: Main { main },
+        document_id_to_user_id: DocumentIdToUserId { document_id_to_user_id },
+        user_id_to_document_id: UserIdToDocumentId { user_id_to_document_id },
         postings_lists: PostingsLists { postings_lists },
         documents_fields: DocumentsFields { documents_fields },
         documents_fields_counts: DocumentsFieldsCounts { documents_fields_counts },
@@ -500,6 +532,8 @@ pub fn clear(
 ) -> MResult<()> {
     // clear all the stores
     index.main.clear(writer)?;
+    index.document_id_to_user_id.clear(writer)?;
+    index.user_id_to_document_id.clear(writer)?;
     index.postings_lists.clear(writer)?;
     index.documents_fields.clear(writer)?;
     index.documents_fields_counts.clear(writer)?;

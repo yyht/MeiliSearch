@@ -12,6 +12,8 @@ pub fn apply_clear_all(
     index.documents_fields.clear(writer)?;
     index.documents_fields_counts.clear(writer)?;
     index.postings_lists.clear(writer)?;
+    index.document_id_to_user_id.clear(writer)?;
+    index.user_id_to_document_id.clear(writer)?;
     index.docs_words.clear(writer)?;
     index.prefix_documents_cache.clear(writer)?;
     index.prefix_postings_lists_cache.clear(writer)?;
