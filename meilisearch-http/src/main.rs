@@ -7,6 +7,7 @@ use main_error::MainError;
 use meilisearch_http::data::Data;
 use meilisearch_http::option::Opt;
 use meilisearch_http::{create_app, index_update_callback};
+
 use structopt::StructOpt;
 
 mod analytics;
@@ -62,7 +63,7 @@ async fn main() -> Result<(), MainError> {
 
     print_launch_resume(&opt, &data);
 
-    HttpServer::new(move || {
+    let http_server = HttpServer::new(move || {
         create_app(&data)
             .wrap(
                 Cors::new()
@@ -72,10 +73,19 @@ async fn main() -> Result<(), MainError> {
             )
             .wrap(middleware::Logger::default())
             .wrap(middleware::Compress::default())
-    })
-    .bind(opt.http_addr)?
-    .run()
-    .await?;
+    });
+
+    if let Some(config) = opt.get_ssl_config() {
+        http_server
+            .bind_rustls(opt.http_addr, config)?
+            .run()
+            .await?;
+    } else {
+        http_server
+            .bind(opt.http_addr)?
+            .run()
+            .await?;
+    }
 
     Ok(())
 }
