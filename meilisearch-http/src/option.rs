@@ -1,12 +1,14 @@
-use std::path::PathBuf;
-use std::io::{BufReader, Read};
 use std::fs;
+use std::io::{BufReader, Read};
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use rustls::internal::pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
+use rustls::{
+    AllowAnyAnonymousOrAuthenticatedClient, AllowAnyAuthenticatedClient, NoClientAuth,
+    RootCertStore,
+};
 use structopt::StructOpt;
-use rustls::internal::pemfile::{certs, rsa_private_keys, pkcs8_private_keys};
-use rustls::{RootCertStore, NoClientAuth, AllowAnyAuthenticatedClient,
-             AllowAnyAnonymousOrAuthenticatedClient};
 
 const POSSIBLE_ENV: [&str; 2] = ["development", "production"];
 
@@ -93,7 +95,7 @@ impl Opt {
                     } else {
                         AllowAnyAnonymousOrAuthenticatedClient::new(client_auth_roots)
                     }
-                },
+                }
                 None => NoClientAuth::new(),
             };
 
@@ -103,7 +105,8 @@ impl Opt {
             let certs = load_certs(cert_path.to_path_buf());
             let privkey = load_private_key(key_path.to_path_buf());
             let ocsp = load_ocsp(&self.ssl_ocsp_path);
-            config.set_single_cert_with_ocsp_and_sct(certs, privkey, ocsp, vec![])
+            config
+                .set_single_cert_with_ocsp_and_sct(certs, privkey, ocsp, vec![])
                 .expect("bad certificates/private key");
 
             if self.ssl_resumption {
@@ -119,9 +122,7 @@ impl Opt {
             None
         }
     }
-
 }
-
 
 fn load_certs(filename: PathBuf) -> Vec<rustls::Certificate> {
     let certfile = fs::File::open(filename).expect("cannot open certificate file");
@@ -131,16 +132,13 @@ fn load_certs(filename: PathBuf) -> Vec<rustls::Certificate> {
 
 fn load_private_key(filename: PathBuf) -> rustls::PrivateKey {
     let rsa_keys = {
-        let keyfile = fs::File::open(filename.clone())
-            .expect("cannot open private key file");
+        let keyfile = fs::File::open(filename.clone()).expect("cannot open private key file");
         let mut reader = BufReader::new(keyfile);
-        rsa_private_keys(&mut reader)
-            .expect("file contains invalid rsa private key")
+        rsa_private_keys(&mut reader).expect("file contains invalid rsa private key")
     };
 
     let pkcs8_keys = {
-        let keyfile = fs::File::open(filename)
-            .expect("cannot open private key file");
+        let keyfile = fs::File::open(filename).expect("cannot open private key file");
         let mut reader = BufReader::new(keyfile);
         pkcs8_private_keys(&mut reader)
             .expect("file contains invalid pkcs8 private key (encrypted keys not supported)")
