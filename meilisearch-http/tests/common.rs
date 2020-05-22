@@ -4,9 +4,9 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use actix_web::{http::StatusCode, test};
+use meilisearch_core::DatabaseOptions;
 use meilisearch_http::data::Data;
 use meilisearch_http::option::Opt;
-use meilisearch_core::DatabaseOptions;
 use tempdir::TempDir;
 use tokio::time::delay_for;
 
@@ -29,8 +29,7 @@ impl Server {
             no_analytics: true,
             main_map_size: default_db_options.main_map_size,
             update_map_size: default_db_options.update_map_size,
-            ssl_key_path: None,
-            ssl_cert_path:None,
+            ..Opt::default()
         };
 
         let data = Data::new(opt.clone());
